@@ -191,7 +191,7 @@ dependencies = [
  "criterion",
  "half",
  "memmap2",
- "rand 0.9.4",
+ "rand 0.10.1",
  "serde",
 ]
 
@@ -224,7 +224,7 @@ dependencies = [
  "num-complex",
  "num-integer",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -252,7 +252,7 @@ dependencies = [
  "num-bigint 0.5.1",
  "object_store",
  "once_cell",
- "rand 0.9.4",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "sha2",
@@ -273,7 +273,7 @@ dependencies = [
  "half",
  "num-bigint 0.5.1",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -295,7 +295,7 @@ dependencies = [
  "insta",
  "lexical-core",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.10.1",
  "ryu",
 ]
 
@@ -443,7 +443,7 @@ dependencies = [
  "lexical-core",
  "memchr",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.10.1",
  "ryu",
  "serde",
  "serde_core",
@@ -462,7 +462,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "half",
- "rand 0.9.4",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -487,7 +487,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "half",
- "rand 0.9.4",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -513,7 +513,7 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "num-traits",
- "rand 0.9.4",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -2359,7 +2359,7 @@ dependencies = [
  "parquet-variant-compute",
  "parquet-variant-json",
  "paste",
- "rand 0.9.4",
+ "rand 0.10.1",
  "ring",
  "seq-macro",
  "serde",
@@ -2397,7 +2397,7 @@ dependencies = [
  "indexmap",
  "num-traits",
  "paste",
- "rand 0.9.4",
+ "rand 0.10.1",
  "simdutf8",
  "uuid",
 ]
@@ -2414,7 +2414,7 @@ dependencies = [
  "indexmap",
  "parquet-variant",
  "parquet-variant-json",
- "rand 0.9.4",
+ "rand 0.10.1",
  "serde_json",
  "uuid",
 ]
