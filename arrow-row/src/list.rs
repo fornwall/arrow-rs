@@ -397,7 +397,10 @@ pub unsafe fn decode_fixed_size_list(
     let null_element_encoded = null_element_encoded.row(0);
     let null_element_slice = null_element_encoded.as_ref();
 
-    let mut child_rows = Vec::new();
+    let mut child_rows = Vec::with_capacity(num_rows * value_length);
+    // Reused scratch buffer for the single-element measurement decode, so we don't
+    // heap-allocate a fresh `Vec` for every child element.
+    let mut measure_scratch: Vec<&[u8]> = Vec::with_capacity(1);
     for row in rows {
         let valid = row[0] == 1;
         let mut row_offset = 1;
@@ -407,9 +410,10 @@ pub unsafe fn decode_fixed_size_list(
             }
         } else {
             for _ in 0..value_length {
-                let mut temp_child_rows = vec![&row[row_offset..]];
-                unsafe { converter.convert_raw(&mut temp_child_rows, validate_utf8) }?;
-                let decoded_bytes = row.len() - row_offset - temp_child_rows[0].len();
+                measure_scratch.clear();
+                measure_scratch.push(&row[row_offset..]);
+                unsafe { converter.convert_raw(&mut measure_scratch, validate_utf8) }?;
+                let decoded_bytes = row.len() - row_offset - measure_scratch[0].len();
                 let next_offset = row_offset + decoded_bytes;
                 child_rows.push(&row[row_offset..next_offset]);
                 row_offset = next_offset;
