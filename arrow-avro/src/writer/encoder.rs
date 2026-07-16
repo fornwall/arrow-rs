@@ -1794,8 +1794,6 @@ struct MapEncoder<'a> {
     map: &'a MapArray,
     keys: KeyKind<'a>,
     values: FieldEncoder<'a>,
-    keys_offset: usize,
-    values_offset: usize,
 }
 
 impl<'a> MapEncoder<'a> {
@@ -1822,15 +1820,12 @@ impl<'a> MapEncoder<'a> {
                 value_plan,
                 values_nullability,
             )?,
-            keys_offset: keys_arr.offset(),
-            values_offset: map.values().offset(),
         })
     }
 
     fn encode_map_entries<W, O>(
         out: &mut W,
         keys: &GenericStringArray<O>,
-        keys_offset: usize,
         start: usize,
         end: usize,
         mut write_item: impl FnMut(&mut W, usize) -> Result<(), AvroError>,
@@ -1840,8 +1835,7 @@ impl<'a> MapEncoder<'a> {
         O: OffsetSizeTrait,
     {
         encode_blocked_range(out, start, end, |out, j| {
-            let j_key = j.saturating_sub(keys_offset);
-            write_len_prefixed(out, keys.value(j_key).as_bytes())?;
+            write_len_prefixed(out, keys.value(j).as_bytes())?;
             write_item(out, j)
         })
     }
@@ -1850,27 +1844,14 @@ impl<'a> MapEncoder<'a> {
         let offsets = self.map.offsets();
         let start = offsets[idx] as usize;
         let end = offsets[idx + 1] as usize;
-        let write_item = |out: &mut W, j: usize| {
-            let j_val = j.saturating_sub(self.values_offset);
-            self.values.encode(out, j_val)
-        };
+        let write_item = |out: &mut W, j: usize| self.values.encode(out, j);
         match self.keys {
-            KeyKind::Utf8(arr) => MapEncoder::<'a>::encode_map_entries(
-                out,
-                arr,
-                self.keys_offset,
-                start,
-                end,
-                write_item,
-            ),
-            KeyKind::LargeUtf8(arr) => MapEncoder::<'a>::encode_map_entries(
-                out,
-                arr,
-                self.keys_offset,
-                start,
-                end,
-                write_item,
-            ),
+            KeyKind::Utf8(arr) => {
+                MapEncoder::<'a>::encode_map_entries(out, arr, start, end, write_item)
+            }
+            KeyKind::LargeUtf8(arr) => {
+                MapEncoder::<'a>::encode_map_entries(out, arr, start, end, write_item)
+            }
         }
     }
 }
@@ -2009,7 +1990,6 @@ where
 struct ListEncoder<'a, O: OffsetSizeTrait> {
     list: &'a GenericListArray<O>,
     values: FieldEncoder<'a>,
-    values_offset: usize,
 }
 
 type ListEncoder32<'a> = ListEncoder<'a, i32>;
@@ -2028,7 +2008,6 @@ impl<'a, O: OffsetSizeTrait> ListEncoder<'a, O> {
                 item_plan,
                 items_nullability,
             )?,
-            values_offset: list.values().offset(),
         })
     }
 
@@ -2038,10 +2017,7 @@ impl<'a, O: OffsetSizeTrait> ListEncoder<'a, O> {
         start: usize,
         end: usize,
     ) -> Result<(), AvroError> {
-        encode_blocked_range(out, start, end, |out, row| {
-            self.values
-                .encode(out, row.saturating_sub(self.values_offset))
-        })
+        encode_blocked_range(out, start, end, |out, row| self.values.encode(out, row))
     }
 
     fn encode<W: Write + ?Sized>(&mut self, out: &mut W, idx: usize) -> Result<(), AvroError> {
@@ -2060,7 +2036,6 @@ impl<'a, O: OffsetSizeTrait> ListEncoder<'a, O> {
 struct ListViewEncoder<'a, O: OffsetSizeTrait> {
     list: &'a GenericListViewArray<O>,
     values: FieldEncoder<'a>,
-    values_offset: usize,
 }
 type ListViewEncoder32<'a> = ListViewEncoder<'a, i32>;
 type ListViewEncoder64<'a> = ListViewEncoder<'a, i64>;
@@ -2078,7 +2053,6 @@ impl<'a, O: OffsetSizeTrait> ListViewEncoder<'a, O> {
                 item_plan,
                 items_nullability,
             )?,
-            values_offset: list.values().offset(),
         })
     }
 
@@ -2089,12 +2063,8 @@ impl<'a, O: OffsetSizeTrait> ListViewEncoder<'a, O> {
         let len = self.list.value_size(idx).to_usize().ok_or_else(|| {
             AvroError::InvalidArgument(format!("Error converting value_size[{idx}] to usize"))
         })?;
-        let start = start + self.values_offset;
         let end = start + len;
-        encode_blocked_range(out, start, end, |out, row| {
-            self.values
-                .encode(out, row.saturating_sub(self.values_offset))
-        })
+        encode_blocked_range(out, start, end, |out, row| self.values.encode(out, row))
     }
 }
 
@@ -2102,7 +2072,6 @@ impl<'a, O: OffsetSizeTrait> ListViewEncoder<'a, O> {
 struct FixedSizeListEncoder<'a> {
     list: &'a FixedSizeListArray,
     values: FieldEncoder<'a>,
-    values_offset: usize,
     elem_len: usize,
 }
 
@@ -2119,20 +2088,15 @@ impl<'a> FixedSizeListEncoder<'a> {
                 item_plan,
                 items_nullability,
             )?,
-            values_offset: list.values().offset(),
             elem_len: list.value_length() as usize,
         })
     }
 
     fn encode<W: Write + ?Sized>(&mut self, out: &mut W, idx: usize) -> Result<(), AvroError> {
         // Starting index is relative to values() start
-        let rel = self.list.value_offset(idx) as usize;
-        let start = self.values_offset + rel;
+        let start = self.list.value_offset(idx) as usize;
         let end = start + self.elem_len;
-        encode_blocked_range(out, start, end, |out, row| {
-            self.values
-                .encode(out, row.saturating_sub(self.values_offset))
-        })
+        encode_blocked_range(out, start, end, |out, row| self.values.encode(out, row))
     }
 }
 
