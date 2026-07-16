@@ -81,6 +81,27 @@ fn join_streams_variable(
 
 impl<T: DataType> Decoder<T> for ByteStreamSplitDecoder<T> {
     fn set_data(&mut self, data: Bytes, num_values: usize) -> Result<()> {
+        let type_size = T::get_type_size();
+        // The BYTE_STREAM_SPLIT layout is exactly `num_values * type_size` bytes.
+        // Validate the buffer holds enough data to avoid an out-of-bounds panic in
+        // `get`/`join_streams_const` when a corrupt page reports more values than it holds.
+        let expected_len = num_values.checked_mul(type_size).ok_or_else(|| {
+            general_err!(
+                "byte stream split num_values {} overflows when multiplied by type size {}",
+                num_values,
+                type_size
+            )
+        })?;
+        if data.len() != expected_len {
+            return Err(general_err!(
+                "byte stream split data length {} does not match expected length {} for {} values of size {}",
+                data.len(),
+                expected_len,
+                num_values,
+                type_size
+            ));
+        }
+
         self.encoded_bytes = data;
         self.total_num_values = num_values;
         self.values_decoded = 0;
@@ -137,6 +158,47 @@ impl<T: DataType> Decoder<T> for ByteStreamSplitDecoder<T> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_type::{FixedLenByteArrayType, FloatType};
+
+    #[test]
+    fn test_set_data_rejects_truncated_page() {
+        // 20 bytes of data, but the page claims 10 f32 (4-byte) values, which would
+        // require 40 bytes. This must return an error rather than panicking with an
+        // out-of-bounds index during `get`.
+        let mut decoder = ByteStreamSplitDecoder::<FloatType>::new();
+        let data = Bytes::from(vec![0u8; 20]);
+        assert!(decoder.set_data(data, 10).is_err());
+    }
+
+    #[test]
+    fn test_set_data_accepts_exact_length() {
+        // 40 bytes for 10 f32 values is exactly right and must succeed.
+        let mut decoder = ByteStreamSplitDecoder::<FloatType>::new();
+        let data = Bytes::from(vec![0u8; 40]);
+        assert!(decoder.set_data(data, 10).is_ok());
+    }
+
+    #[test]
+    fn test_variable_width_set_data_rejects_truncated_page() {
+        // type_width = 4, so 20 bytes holds 5 elements, but the page claims 10 values.
+        // This must return an error rather than panicking during `get`.
+        let mut decoder = VariableWidthByteStreamSplitDecoder::<FixedLenByteArrayType>::new(4);
+        let data = Bytes::from(vec![0u8; 20]);
+        assert!(decoder.set_data(data, 10).is_err());
+    }
+
+    #[test]
+    fn test_variable_width_set_data_accepts_sufficient_length() {
+        // 40 bytes with type_width 4 holds 10 elements, matching the claimed value count.
+        let mut decoder = VariableWidthByteStreamSplitDecoder::<FixedLenByteArrayType>::new(4);
+        let data = Bytes::from(vec![0u8; 40]);
+        assert!(decoder.set_data(data, 10).is_ok());
+    }
+}
+
 pub struct VariableWidthByteStreamSplitDecoder<T: DataType> {
     _phantom: PhantomData<T>,
     encoded_bytes: Bytes,
@@ -164,6 +226,18 @@ impl<T: DataType> Decoder<T> for VariableWidthByteStreamSplitDecoder<T> {
             return Err(general_err!(
                 "Input data length is not a multiple of type width {}",
                 self.type_width
+            ));
+        }
+
+        // Ensure the buffer holds at least `num_values` elements. Without this a truncated
+        // page that reports more values than it contains would cause an out-of-bounds panic
+        // in `get`/`join_streams_const`/`join_streams_variable`.
+        if data.len() / self.type_width < num_values {
+            return Err(general_err!(
+                "byte stream split data holds {} elements of width {} but {} values were requested",
+                data.len() / self.type_width,
+                self.type_width,
+                num_values
             ));
         }
 
