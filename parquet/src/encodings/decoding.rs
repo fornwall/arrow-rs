@@ -1007,10 +1007,26 @@ impl<T: DataType> Decoder<T> for DeltaLengthByteArrayDecoder<T> {
                 let num_values = cmp::min(buffer.len(), self.num_values);
 
                 for item in buffer.iter_mut().take(num_values) {
-                    let len = self.lengths[self.current_idx] as usize;
-                    item.set_from_bytes(data.slice(self.offset..self.offset + len));
+                    let len = usize::try_from(self.lengths[self.current_idx]).map_err(|_| {
+                        general_err!(
+                            "Invalid DELTA_LENGTH_BYTE_ARRAY length {}",
+                            self.lengths[self.current_idx]
+                        )
+                    })?;
 
-                    self.offset += len;
+                    let end_offset = self.offset.checked_add(len).filter(|end| *end <= data.len());
+                    let end_offset = end_offset.ok_or_else(|| {
+                        general_err!(
+                            "DELTA_LENGTH_BYTE_ARRAY length {} at offset {} exceeds data length {}",
+                            len,
+                            self.offset,
+                            data.len()
+                        )
+                    })?;
+
+                    item.set_from_bytes(data.slice(self.offset..end_offset));
+
+                    self.offset = end_offset;
                     self.current_idx += 1;
                 }
 
@@ -1036,13 +1052,34 @@ impl<T: DataType> Decoder<T> for DeltaLengthByteArrayDecoder<T> {
             Type::BYTE_ARRAY => {
                 let num_values = cmp::min(num_values, self.num_values);
 
-                let next_offset: i32 = self.lengths
-                    [self.current_idx..self.current_idx + num_values]
-                    .iter()
-                    .sum();
+                let data_len = self.data.as_ref().map(|d| d.len()).unwrap_or(0);
+
+                let mut next_offset: i64 = 0;
+                for &len in
+                    &self.lengths[self.current_idx..self.current_idx + num_values]
+                {
+                    next_offset += i64::from(len);
+                }
+
+                let len = usize::try_from(next_offset).map_err(|_| {
+                    general_err!(
+                        "Invalid DELTA_LENGTH_BYTE_ARRAY total skip length {}",
+                        next_offset
+                    )
+                })?;
+
+                let end_offset = self.offset.checked_add(len).filter(|end| *end <= data_len);
+                let end_offset = end_offset.ok_or_else(|| {
+                    general_err!(
+                        "DELTA_LENGTH_BYTE_ARRAY skip length {} at offset {} exceeds data length {}",
+                        len,
+                        self.offset,
+                        data_len
+                    )
+                })?;
 
                 self.current_idx += num_values;
-                self.offset += next_offset as usize;
+                self.offset = end_offset;
 
                 self.num_values -= num_values;
                 Ok(num_values)
@@ -1286,6 +1323,88 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Invalid DELTA_BYTE_ARRAY prefix length"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_delta_length_byte_array_negative_length_returns_error() {
+        let col_descr = create_test_col_desc_ptr(-1, Type::BYTE_ARRAY);
+
+        let mut encoder =
+            get_encoder::<ByteArrayType>(Encoding::DELTA_LENGTH_BYTE_ARRAY, &col_descr).unwrap();
+        let input = vec![ByteArray::from("hello"), ByteArray::from("world")];
+        encoder.put(&input).unwrap();
+        let encoded = encoder.flush_buffer().unwrap();
+
+        let mut decoder = DeltaLengthByteArrayDecoder::<ByteArrayType>::new();
+        decoder.set_data(encoded, input.len()).unwrap();
+
+        // Force a negative length after decoder initialization. On unpatched code this
+        // becomes a huge usize via `as usize` and panics inside Bytes::slice.
+        decoder.lengths[0] = -1;
+        let mut out = vec![ByteArray::new(); input.len()];
+
+        let err = decoder.get(&mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid DELTA_LENGTH_BYTE_ARRAY length"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_delta_length_byte_array_oversized_length_returns_error() {
+        let col_descr = create_test_col_desc_ptr(-1, Type::BYTE_ARRAY);
+
+        let mut encoder =
+            get_encoder::<ByteArrayType>(Encoding::DELTA_LENGTH_BYTE_ARRAY, &col_descr).unwrap();
+        let input = vec![ByteArray::from("hello"), ByteArray::from("world")];
+        encoder.put(&input).unwrap();
+        let encoded = encoder.flush_buffer().unwrap();
+
+        let mut decoder = DeltaLengthByteArrayDecoder::<ByteArrayType>::new();
+        decoder.set_data(encoded, input.len()).unwrap();
+
+        // Force an oversized length that overruns the data buffer. On unpatched code the
+        // `self.offset + len` slice exceeds `data.len()` and panics inside Bytes::slice.
+        decoder.lengths[0] = i32::MAX;
+        let mut out = vec![ByteArray::new(); input.len()];
+
+        let err = decoder.get(&mut out).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds data length"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_delta_length_byte_array_skip_invalid_length_returns_error() {
+        let col_descr = create_test_col_desc_ptr(-1, Type::BYTE_ARRAY);
+
+        let mut encoder =
+            get_encoder::<ByteArrayType>(Encoding::DELTA_LENGTH_BYTE_ARRAY, &col_descr).unwrap();
+        let input = vec![ByteArray::from("hello"), ByteArray::from("world")];
+        encoder.put(&input).unwrap();
+        let encoded = encoder.flush_buffer().unwrap();
+
+        let mut decoder = DeltaLengthByteArrayDecoder::<ByteArrayType>::new();
+        decoder.set_data(encoded, input.len()).unwrap();
+
+        // Force lengths that overflow/overrun when summed during skip. On unpatched code
+        // this can panic on i32 overflow (debug) or corrupt `self.offset`.
+        decoder.lengths[0] = i32::MAX;
+        decoder.lengths[1] = i32::MAX;
+
+        let err = decoder.skip(input.len()).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds data length")
+                || err
+                    .to_string()
+                    .contains("Invalid DELTA_LENGTH_BYTE_ARRAY total skip length"),
             "{}",
             err
         );
