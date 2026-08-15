@@ -4244,6 +4244,86 @@ mod tests {
     }
 
     #[test]
+    fn test_fixed_size_list_decode_roundtrip() {
+        // Exercises `decode_fixed_size_list` with:
+        //  * nulls in the outer list,
+        //  * a variable-width child (Utf8) whose per-element byte length must be
+        //    derived while decoding, plus a fixed-width child (Int32),
+        //  * null child elements, and
+        //  * multiple rows.
+        // Asserts `convert_rows(convert_columns([arr])) == [arr]` for every
+        // combination of ascending/descending and nulls-first/last.
+
+        // FixedSizeList<Utf8> with size 2.
+        let mut utf8 = FixedSizeListBuilder::new(StringBuilder::new(), 2);
+        // 0: ["", "hello"]
+        utf8.values().append_value("");
+        utf8.values().append_value("hello");
+        utf8.append(true);
+        // 1: null (masked data)
+        utf8.values().append_value("masked");
+        utf8.values().append_value("data");
+        utf8.append(false);
+        // 2: ["a somewhat longer string", null]
+        utf8.values().append_value("a somewhat longer string");
+        utf8.values().append_null();
+        utf8.append(true);
+        // 3: [null, null]
+        utf8.values().append_null();
+        utf8.values().append_null();
+        utf8.append(true);
+        let utf8 = Arc::new(utf8.finish()) as ArrayRef;
+
+        // FixedSizeList<Int32> with size 3 (same number of rows).
+        let mut ints = FixedSizeListBuilder::new(Int32Builder::new(), 3);
+        // 0: [1, 2, 3]
+        ints.values().append_value(1);
+        ints.values().append_value(2);
+        ints.values().append_value(3);
+        ints.append(true);
+        // 1: [4, null, 6]
+        ints.values().append_value(4);
+        ints.values().append_null();
+        ints.values().append_value(6);
+        ints.append(true);
+        // 2: null (masked data)
+        ints.values().append_value(7);
+        ints.values().append_value(8);
+        ints.values().append_value(9);
+        ints.append(false);
+        // 3: [null, null, null]
+        ints.values().append_null();
+        ints.values().append_null();
+        ints.values().append_null();
+        ints.append(true);
+        let ints = Arc::new(ints.finish()) as ArrayRef;
+
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let options = SortOptions::default()
+                    .with_descending(descending)
+                    .with_nulls_first(nulls_first);
+                let converter = RowConverter::new(vec![
+                    SortField::new_with_options(utf8.data_type().clone(), options),
+                    SortField::new_with_options(ints.data_type().clone(), options),
+                ])
+                .unwrap();
+
+                let rows = converter
+                    .convert_columns(&[Arc::clone(&utf8), Arc::clone(&ints)])
+                    .unwrap();
+                let back = converter.convert_rows(&rows).unwrap();
+
+                assert_eq!(back.len(), 2);
+                back[0].to_data().validate_full().unwrap();
+                back[1].to_data().validate_full().unwrap();
+                assert_eq!(&back[0], &utf8);
+                assert_eq!(&back[1], &ints);
+            }
+        }
+    }
+
+    #[test]
     fn test_single_map() {
         let mut builder = MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
         // Entry 0: {"hello": 1, "world": 2}
