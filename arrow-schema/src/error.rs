@@ -58,6 +58,17 @@ pub enum ArrowError {
     ParquetError(String),
     /// Error during import or export to/from the C Data Interface
     CDataInterface(String),
+    /// Error during import or export to/from the C Stream Interface
+    ///
+    /// `code` is an errno-compatible value as specified by the C Stream Interface. A
+    /// producer returns it to report conditions such as cancellation (`ECANCELED`), and a
+    /// consumer importing a stream recovers the code a producer returned.
+    CStreamError {
+        /// An errno-compatible code as specified by the C Stream Interface.
+        code: i32,
+        /// A human-readable description of the failure.
+        message: String,
+    },
     /// Error when a dictionary key is bigger than the key type
     DictionaryKeyOverflowError,
     /// Error when the run end index in a REE array is bigger than the array length
@@ -124,6 +135,9 @@ impl Display for ArrowError {
             }
             ArrowError::CDataInterface(desc) => {
                 write!(f, "C Data interface error: {desc}")
+            }
+            ArrowError::CStreamError { code, message } => {
+                write!(f, "C Stream interface error (code {code}): {message}")
             }
             ArrowError::DictionaryKeyOverflowError => {
                 write!(f, "Dictionary key bigger than the key type")
