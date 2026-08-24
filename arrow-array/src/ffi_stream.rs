@@ -77,7 +77,7 @@ type Result<T> = std::result::Result<T, ArrowError>;
 // Errno values returned through the C stream interface, taken from libc so they match
 // the platform the consumer interprets them against.
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-use libc::{EINVAL, EIO, ENOMEM, ENOSYS};
+use libc::{ECANCELED, EINVAL, EIO, ENOMEM, ENOSYS};
 
 // wasm32-unknown-unknown has no libc, and no OS to interpret the codes either — any
 // non-zero value works there, so use Linux's.
@@ -89,6 +89,8 @@ const EIO: i32 = 5;
 const EINVAL: i32 = 22;
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 const ENOSYS: i32 = 38;
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+const ECANCELED: i32 = 125;
 
 /// ABI-compatible struct for `ArrayStream` from C Stream Interface
 /// See <https://arrow.apache.org/docs/format/CStreamInterface.html#structure-definitions>
@@ -172,6 +174,9 @@ impl Drop for FFI_ArrowArrayStream {
 
 impl FFI_ArrowArrayStream {
     /// Creates a new [`FFI_ArrowArrayStream`].
+    ///
+    /// Errors from `batch_reader` are reported to the consumer as errno-compatible codes; see
+    /// [`cancelled_error`] for signalling cancellation.
     pub fn new(batch_reader: Box<dyn RecordBatchReader + Send>) -> Self {
         let private_data = Box::new(StreamPrivateData {
             batch_reader,
@@ -321,8 +326,27 @@ fn get_error_code(err: &ArrowError) -> i32 {
     match err {
         ArrowError::NotYetImplemented(_) => ENOSYS,
         ArrowError::MemoryError(_) => ENOMEM,
+        // A raw OS error is not necessarily an errno value, notably on Windows, so it is
+        // not forwarded. This matches ExportedArrayStream::ToCError in Arrow C++.
         ArrowError::IoError(_, _) => EIO,
+        // Zero would tell the consumer the call succeeded, so report the generic code.
+        ArrowError::CStreamError { code: 0, .. } => EINVAL,
+        ArrowError::CStreamError { code, .. } => *code,
         _ => EINVAL,
+    }
+}
+
+/// Creates an error that an exported [`FFI_ArrowArrayStream`] reports as `ECANCELED`, the
+/// code the [C Stream Interface] uses for a cancelled stream.
+///
+/// This is [`ArrowError::CStreamError`] with the platform's `ECANCELED` value; any other
+/// errno-compatible code can be reported by constructing that variant directly.
+///
+/// [C Stream Interface]: https://arrow.apache.org/docs/format/CStreamInterface.html#error-reporting
+pub fn cancelled_error(message: impl Into<String>) -> ArrowError {
+    ArrowError::CStreamError {
+        code: ECANCELED,
+        message: message.into(),
     }
 }
 
@@ -339,6 +363,26 @@ pub struct ArrowArrayStreamReader {
 
 /// Gets schema from a raw pointer of `FFI_ArrowArrayStream`. This is used when constructing
 /// `ArrowArrayStreamReader` to cache schema.
+/// Gets the producer's message for the last failed call on a `FFI_ArrowArrayStream`.
+///
+/// Returns `None` if the producer supplies no message; the C Stream Interface allows both a
+/// NULL `get_last_error` callback and a NULL return from it.
+///
+/// # Safety
+///
+/// `stream_ptr` must point to a valid, not yet released [`FFI_ArrowArrayStream`].
+unsafe fn get_stream_last_error(stream_ptr: *mut FFI_ArrowArrayStream) -> Option<String> {
+    let get_last_error = unsafe { (*stream_ptr).get_last_error }?;
+
+    let error_str = unsafe { get_last_error(stream_ptr) };
+    if error_str.is_null() {
+        return None;
+    }
+
+    let error_str = unsafe { CStr::from_ptr(error_str) };
+    Some(error_str.to_string_lossy().to_string())
+}
+
 fn get_stream_schema(stream_ptr: *mut FFI_ArrowArrayStream) -> Result<SchemaRef> {
     let mut schema = FFI_ArrowSchema::empty();
 
@@ -348,9 +392,12 @@ fn get_stream_schema(stream_ptr: *mut FFI_ArrowArrayStream) -> Result<SchemaRef>
         let schema = Schema::try_from(&schema)?;
         Ok(Arc::new(schema))
     } else {
-        Err(ArrowError::CDataInterface(format!(
-            "Cannot get schema from input stream. Error code: {ret_code:?}"
-        )))
+        let message = unsafe { get_stream_last_error(stream_ptr) }
+            .unwrap_or_else(|| "Cannot get schema from input stream".to_string());
+        Err(ArrowError::CStreamError {
+            code: ret_code,
+            message,
+        })
     }
 }
 
@@ -385,15 +432,7 @@ impl ArrowArrayStreamReader {
 
     /// Get the last error from `ArrowArrayStreamReader`
     fn get_stream_last_error(&mut self) -> Option<String> {
-        let get_last_error = self.stream.get_last_error?;
-
-        let error_str = unsafe { get_last_error(&mut self.stream) };
-        if error_str.is_null() {
-            return None;
-        }
-
-        let error_str = unsafe { CStr::from_ptr(error_str) };
-        Some(error_str.to_string_lossy().to_string())
+        unsafe { get_stream_last_error(&mut self.stream) }
     }
 }
 
@@ -423,9 +462,13 @@ impl Iterator for ArrowArrayStreamReader {
                 )
             }))
         } else {
-            let last_error = self.get_stream_last_error();
-            let err = ArrowError::CDataInterface(last_error.unwrap());
-            Some(Err(err))
+            let message = self
+                .get_stream_last_error()
+                .unwrap_or_else(|| "Cannot get next batch from input stream".to_string());
+            Some(Err(ArrowError::CStreamError {
+                code: ret_code,
+                message,
+            }))
         }
     }
 }
@@ -603,6 +646,121 @@ mod tests {
         assert!(produced_batches[0].is_err());
 
         Ok(())
+    }
+
+    fn error_code_of(err: ArrowError) -> i32 {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
+        let iter = Box::new(std::iter::once(Err(err)));
+        let mut stream =
+            FFI_ArrowArrayStream::new(Box::new(TestRecordBatchReader::new(schema, iter)));
+
+        let mut array = FFI_ArrowArray::empty();
+        unsafe { get_next(&mut stream, &mut array) }
+    }
+
+    #[test]
+    fn test_export_error_codes() {
+        assert_eq!(error_code_of(cancelled_error("cancelled")), ECANCELED);
+        assert_eq!(
+            error_code_of(ArrowError::CStreamError {
+                code: 0,
+                message: String::new(),
+            }),
+            EINVAL,
+        );
+        assert_eq!(
+            error_code_of(ArrowError::IoError(
+                String::new(),
+                std::io::Error::from_raw_os_error(ECANCELED),
+            )),
+            EIO,
+        );
+        assert_eq!(
+            error_code_of(ArrowError::MemoryError(String::new())),
+            ENOMEM
+        );
+        assert_eq!(
+            error_code_of(ArrowError::IoError(
+                String::new(),
+                std::io::Error::other("broken"),
+            )),
+            EIO,
+        );
+        assert_eq!(
+            error_code_of(ArrowError::InvalidArgumentError(String::new())),
+            EINVAL,
+        );
+    }
+
+    #[test]
+    fn test_error_code_round_trip() {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
+        let iter = Box::new(std::iter::once(Err(cancelled_error("cancelled"))));
+        let stream = FFI_ArrowArrayStream::new(Box::new(TestRecordBatchReader::new(schema, iter)));
+
+        let err = ArrowArrayStreamReader::try_new(stream)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap_err();
+
+        match err {
+            ArrowError::CStreamError { code, message } => {
+                assert_eq!(code, ECANCELED);
+                assert!(message.contains("cancelled"), "{message}");
+            }
+            err => panic!("unexpected error: {err}"),
+        }
+    }
+
+    unsafe extern "C" fn failing_get_schema(
+        _stream: *mut FFI_ArrowArrayStream,
+        _out: *mut FFI_ArrowSchema,
+    ) -> c_int {
+        ECANCELED
+    }
+
+    unsafe extern "C" fn cancelled_last_error(_stream: *mut FFI_ArrowArrayStream) -> *const c_char {
+        c"the producer cancelled".as_ptr()
+    }
+
+    unsafe extern "C" fn release_noop(stream: *mut FFI_ArrowArrayStream) {
+        unsafe { (*stream).release = None };
+    }
+
+    fn failing_schema_stream(
+        get_last_error: Option<unsafe extern "C" fn(*mut FFI_ArrowArrayStream) -> *const c_char>,
+    ) -> FFI_ArrowArrayStream {
+        let mut stream = FFI_ArrowArrayStream::empty();
+        stream.get_schema = Some(failing_get_schema);
+        stream.get_last_error = get_last_error;
+        stream.release = Some(release_noop);
+        stream
+    }
+
+    #[test]
+    fn test_import_schema_error() {
+        let err =
+            ArrowArrayStreamReader::try_new(failing_schema_stream(Some(cancelled_last_error)))
+                .unwrap_err();
+        match err {
+            ArrowError::CStreamError { code, message } => {
+                assert_eq!(code, ECANCELED);
+                assert_eq!(message, "the producer cancelled");
+            }
+            err => panic!("unexpected error: {err}"),
+        }
+
+        // A producer may supply no message: `get_last_error` itself may be NULL, and it may
+        // also return NULL.
+        let err = ArrowArrayStreamReader::try_new(failing_schema_stream(None)).unwrap_err();
+        match err {
+            ArrowError::CStreamError { code, message } => {
+                assert_eq!(code, ECANCELED);
+                assert_eq!(message, "Cannot get schema from input stream");
+            }
+            err => panic!("unexpected error: {err}"),
+        }
     }
 
     // A consumer wraps the release callback with its own, then chains back to
