@@ -781,6 +781,47 @@ mod tests {
     }
 
     #[test]
+    fn write_timestamps_custom_format_is_escaped() {
+        // A user-provided format string may contain characters that are not valid inside
+        // a JSON string, such as `"` and `\`. chrono emits these literally, so the writer
+        // must JSON-escape the formatted value to keep the output valid JSON.
+        let ts_string = "2018-11-13T17:11:10.011375885995";
+        let ts_nanos = ts_string
+            .parse::<chrono::NaiveDateTime>()
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let ts_millis = ts_nanos / 1_000_000;
+
+        let arr_millis = TimestampMillisecondArray::from(vec![Some(ts_millis)]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "millis",
+            arr_millis.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr_millis)]).unwrap();
+
+        // Format string containing both a literal double quote and a backslash.
+        let mut buf = Vec::new();
+        {
+            let mut writer = WriterBuilder::new()
+                .with_timestamp_format(r#"%Y"\%m"#.to_string())
+                .build::<_, LineDelimited>(&mut buf);
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        // Each output line must be parseable as valid JSON.
+        let output = std::str::from_utf8(&buf).unwrap();
+        let line = output.lines().next().unwrap();
+        let value: Value = serde_json::from_str(line)
+            .expect("writer must emit valid JSON even with custom format strings");
+
+        // The literal quote and backslash must round-trip in the parsed string value.
+        assert_eq!(value["millis"], json!(r#"2018"\11"#));
+    }
+
+    #[test]
     fn write_timestamps_with_tz() {
         let ts_string = "2018-11-13T17:11:10.011375885995";
         let ts_nanos = ts_string
