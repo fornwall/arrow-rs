@@ -371,9 +371,12 @@ impl FixedSizeListArray {
     /// Returns the offset for value at index `i`.
     ///
     /// Note this doesn't do any bound checking, for performance reason.
+    ///
+    /// # Panics
+    /// Panics if the offset does not fit in an `i32`
     #[inline]
     pub fn value_offset(&self, i: usize) -> i32 {
-        self.value_offset_at(i) as i32
+        i32::try_from(self.value_offset_at(i)).expect("offset overflow")
     }
 
     /// Returns the length for an element.
@@ -768,6 +771,17 @@ mod tests {
         assert_eq!(2, sliced_list_array.value_length());
         assert_eq!(4, sliced_list_array.value_offset(2));
         assert_eq!(6, sliced_list_array.value_offset(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "offset overflow")]
+    fn test_fixed_size_list_array_value_offset_overflow() {
+        let list_array = FixedSizeListArray::new_null(
+            Arc::new(Field::new_list_field(DataType::Int32, true)),
+            i32::MAX,
+            1,
+        );
+        list_array.value_offset(2);
     }
 
     #[test]
