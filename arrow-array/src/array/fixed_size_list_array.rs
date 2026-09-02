@@ -374,6 +374,7 @@ impl FixedSizeListArray {
     ///
     /// # Panics
     /// Panics if the offset does not fit in an `i32`
+    #[deprecated(since = "60.0.0", note = "Use i * value_size() instead")]
     #[inline]
     pub fn value_offset(&self, i: usize) -> i32 {
         i32::try_from(self.value_offset_at(i)).expect("offset overflow")
@@ -382,14 +383,28 @@ impl FixedSizeListArray {
     /// Returns the length for an element.
     ///
     /// All elements have the same length as the array is a fixed size.
+    ///
+    /// Returns an `i32` to be compatible with the Arrow spec.
+    ///
+    /// Use [`Self::value_size`] to return a `usize`.
     #[inline]
     pub const fn value_length(&self) -> i32 {
         self.value_length
     }
 
+    /// Return the length for an element, as a usize.
+    ///
+    /// All elements have the same length as the array is a fixed size.
+    ///
+    /// Note: This value will always fit, without overflow, into an i32
+    #[inline]
+    pub const fn value_size(&self) -> usize {
+        self.value_length as usize
+    }
+
     #[inline]
     const fn value_offset_at(&self, i: usize) -> usize {
-        i * self.value_length as usize
+        i * self.value_size()
     }
 
     /// Returns a zero-copy slice of this array with the indicated offset and length.
@@ -665,7 +680,7 @@ mod tests {
         assert_eq!(DataType::Int32, list_array.value_type());
         assert_eq!(3, list_array.len());
         assert_eq!(0, list_array.null_count());
-        assert_eq!(6, list_array.value_offset(2));
+        assert_eq!(6, 2 * list_array.value_size());
         assert_eq!(3, list_array.value_length());
         assert_eq!(0, list_array.value(0).as_primitive::<Int32Type>().value(0));
         for i in 0..3 {
@@ -687,7 +702,7 @@ mod tests {
         assert_eq!(2, list_array.len());
         assert_eq!(0, list_array.null_count());
         assert_eq!(3, list_array.value(0).as_primitive::<Int32Type>().value(0));
-        assert_eq!(3, list_array.value_offset(1));
+        assert_eq!(3, list_array.value_size());
         assert_eq!(3, list_array.value_length());
     }
 
@@ -748,7 +763,7 @@ mod tests {
         assert_eq!(DataType::Int32, list_array.value_type());
         assert_eq!(5, list_array.len());
         assert_eq!(2, list_array.null_count());
-        assert_eq!(6, list_array.value_offset(3));
+        assert_eq!(6, 3 * list_array.value_size());
         assert_eq!(2, list_array.value_length());
 
         let sliced_array = list_array.slice(1, 4);
@@ -769,8 +784,7 @@ mod tests {
             .downcast_ref::<FixedSizeListArray>()
             .unwrap();
         assert_eq!(2, sliced_list_array.value_length());
-        assert_eq!(4, sliced_list_array.value_offset(2));
-        assert_eq!(6, sliced_list_array.value_offset(3));
+        assert_eq!(2, sliced_list_array.value_size());
     }
 
     #[test]
@@ -781,6 +795,7 @@ mod tests {
             i32::MAX,
             1,
         );
+        #[expect(deprecated)]
         list_array.value_offset(2);
     }
 

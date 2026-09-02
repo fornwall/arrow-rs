@@ -335,7 +335,7 @@ impl FixedSizeBinaryArray {
     #[deprecated(since = "59.0.0", note = "Use i * value_size() instead")]
     #[inline]
     pub fn value_offset(&self, i: usize) -> i32 {
-        self.value_length() * i as i32
+        i32::try_from(i * self.value_size).expect("offset overflow")
     }
 
     /// Returns the length for an element.
@@ -918,6 +918,14 @@ mod tests {
     use super::*;
     use crate::RecordBatch;
     use arrow_schema::{Field, Schema};
+
+    #[test]
+    #[should_panic(expected = "offset overflow")]
+    fn test_fixed_size_binary_array_value_offset_overflow() {
+        let array = FixedSizeBinaryArray::new_null(i32::MAX, 1);
+        #[expect(deprecated)]
+        array.value_offset(2);
+    }
 
     #[test]
     fn test_fixed_size_binary_array() {

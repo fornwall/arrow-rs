@@ -1258,7 +1258,7 @@ where
                 .value(i)
                 .to_usize()
                 .ok_or_else(|| ArrowError::ComputeError("Cast to usize failed".to_string()))?;
-            let start = list.value_offset(index) as <UInt32Type as ArrowPrimitiveType>::Native;
+            let start = (index * list.value_size()) as <UInt32Type as ArrowPrimitiveType>::Native;
 
             // Safety: Range always has known length.
             unsafe {

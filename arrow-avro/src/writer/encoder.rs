@@ -2100,7 +2100,6 @@ impl<'a, O: OffsetSizeTrait> ListViewEncoder<'a, O> {
 
 /// FixedSizeList encoder.
 struct FixedSizeListEncoder<'a> {
-    list: &'a FixedSizeListArray,
     values: FieldEncoder<'a>,
     values_offset: usize,
     elem_len: usize,
@@ -2113,20 +2112,19 @@ impl<'a> FixedSizeListEncoder<'a> {
         item_plan: &FieldPlan,
     ) -> Result<Self, AvroError> {
         Ok(Self {
-            list,
             values: FieldEncoder::make_encoder(
                 list.values().as_ref(),
                 item_plan,
                 items_nullability,
             )?,
             values_offset: list.values().offset(),
-            elem_len: list.value_length() as usize,
+            elem_len: list.value_size(),
         })
     }
 
     fn encode<W: Write + ?Sized>(&mut self, out: &mut W, idx: usize) -> Result<(), AvroError> {
         // Starting index is relative to values() start
-        let rel = self.list.value_offset(idx) as usize;
+        let rel = idx * self.elem_len;
         let start = self.values_offset + rel;
         let end = start + self.elem_len;
         encode_blocked_range(out, start, end, |out, row| {
